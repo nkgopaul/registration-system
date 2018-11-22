@@ -1,0 +1,71 @@
+For updating personal details (Address):
+
+CREATE PROCEDURE update_address(IN student_id int(11), IN new_address varchar(50))
+BEGIN
+START TRANSACTION;
+UPDATE student SET address=new_address WHERE Id=student_id;
+COMMIT;
+END //
+
+For updating personal details (Password):
+
+CREATE PROCEDURE update_password(IN student_id int(11), IN new_password varchar(10))
+BEGIN
+START TRANSACTION;
+UPDATE student SET password=new_password WHERE Id=student_id;
+COMMIT;
+END //
+
+For withdrawing from a course:
+
+CREATE PROCEDURE withdraw(IN student_id int(11), IN class_code char(8), IN current_semester char(2), IN current_year int(11), IN next_semester char(2), IN next_year int(11), OUT found_uoscode char(8), OUT found_semester char(2), OUT found_year int(11), OUT flag int(11))
+BEGIN
+SELECT UoSCode, Semester, Year INTO found_uoscode, found_semester, found_year FROM transcript WHERE StudId=student_id AND UoSCode=class_code AND Grade IS NULL AND ((Semester=current_semester AND Year=current_year) OR (Semester=next_semester AND Year=next_year));
+IF (found_uoscode IS NULL) THEN SET flag=1;
+ELSE
+SET flag=10;
+START TRANSACTION;
+DELETE FROM transcript WHERE StudId=student_id AND UoSCode=found_uoscode AND Semester=found_semester AND Year=found_year;
+UPDATE uosoffering SET Enrollment=Enrollment-1 WHERE UoSCode=found_uoscode AND Semester=found_semester AND Year=found_year;
+COMMIT;
+END IF;
+END//
+
+For checking enrollment status upon course withdrawal:
+
+drop trigger if exists enrollmentlimit;
+create trigger enrollmentlimit
+after update on uosoffering
+for each row
+begin
+    if new.Enrollment<(0.5*NEW.MaxEnrollment)
+    then insert ignore into below_half values(new.UoSCode, new.Semester, new.Year);
+    elseif new.Enrollment>=(0.5*NEW.MaxEnrollment)
+    then delete from below_half where UoSCode=new.UoSCode AND Semester=new.Semester AND Year=new.Year;
+    end if;
+end; //
+
+For enrolling in a course:
+
+CREATE PROCEDURE enroll
+    (IN student_id int(11),
+    IN class_code char(8),
+    IN class_semester char(2),
+    IN class_year int(11),
+    IN datenow date,
+    OUT flag int(11))
+BEGIN
+IF NOT EXISTS (SELECT * FROM uosoffering WHERE UoSCode=class_code AND Semester=class_semester AND Year=class_year) THEN SET flag=4;
+ELSEIF EXISTS ((SELECT * FROM transcript WHERE StudId=student_id AND UoSCode=class_code AND Grade IS NOT NULL) UNION 
+            (SELECT * FROM transcript WHERE StudId=student_id AND UoSCode=class_code AND Semester=class_semester AND Year=class_year))THEN SET flag=1;
+ELSEIF EXISTS (SELECT * FROM uosoffering WHERE UoSCode=class_code AND Semester=class_semester AND Year=class_year AND MaxEnrollment<=Enrollment) THEN SET flag=2;
+ELSEIF NOT EXISTS (SELECT * FROM (SELECT COUNT(*) AS total_prereq FROM requires WHERE UoSCode=class_code) AS A, (SELECT COUNT(*) AS stud_prereq FROM requires JOIN transcript ON PrereqUoSCode=transcript.UoSCode WHERE StudId=student_id AND requires.UoSCode=class_code AND Grade IS NOT NULL AND EnforcedSince < datenow) AS B WHERE A.total_prereq=B.stud_prereq)
+    THEN SET flag=3;
+ELSE 
+SET flag=10;
+start transaction;
+	insert into transcript values (student_id, class_code, class_semester, class_year, NULL);
+	UPDATE uosoffering SET Enrollment = Enrollment + 1 WHERE UoSCode = class_code AND Year = class_year AND Semester = class_semester;
+commit;
+END IF;
+END//
